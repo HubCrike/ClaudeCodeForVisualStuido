@@ -1,0 +1,4 @@
+User-Agent: *
+Disallow: /api/
+
+Sitemap: https://platform.claude.com/sitemap.xml
