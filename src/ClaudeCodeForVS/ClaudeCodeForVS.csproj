@@ -56,6 +56,7 @@
       <DependentUpon>ClaudeChatControl.xaml</DependentUpon>
     </Compile>
     <Compile Include="ClaudeChatCommand.cs" />
+    <Compile Include="Services\ClaudeAgentBridge.cs" />
     <Compile Include="Services\ClaudeCodeCommandService.cs" />
     <Compile Include="Services\EditorContextService.cs" />
     <Compile Include="Services\LogService.cs" />
@@ -130,6 +131,11 @@
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
     <Content Include="wwwroot\index.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+    <!-- Claude Agent Service - esbuild 打包后的单文件 -->
+    <Content Include="wwwroot\claude-agent\index.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>

@@ -41,26 +41,56 @@ namespace ClaudeCodeForVS.Services
                 }
 
                 // 根据运行模式使用不同的日志文件名 / Use different log file names by mode
-                // Debug 模式: claude-code-debug-20260106.log / Debug mode
+                // Debug 模式: claude-code-debug.log / Debug mode
                 // Release 模式: claude-code-20260106.log / Release mode
-                string filePrefix = IsDebugMode() ? "claude-code-debug-" : "claude-code-";
+                bool isDebug = IsDebugMode();
+                string filePrefix = isDebug ? "claude-code-debug" : "claude-code-";
                 string logFile = Path.Combine(logFolder, filePrefix + ".log");
 
-                _logger = new LoggerConfiguration()
-                    .MinimumLevel.Debug()
+                // DEBUG 模式下，启动时清空日志文件 / Clear log file on startup in DEBUG mode
+                if (isDebug)
+                {
+                    try
+                    {
+                        // 删除旧的 debug 日志文件
+                        if (File.Exists(logFile))
+                        {
+                            File.Delete(logFile);
+                        }
+                        // 也删除带日期后缀的旧文件
+                        foreach (var oldFile in Directory.GetFiles(logFolder, "claude-code-debug*.log"))
+                        {
+                            try { File.Delete(oldFile); } catch { }
+                        }
+                    }
+                    catch { /* 忽略删除失败 */ }
+                }
+
+                // DEBUG 模式使用 Debug 级别，Release 使用 Information 级别
+                var logConfig = new LoggerConfiguration();
+                if (isDebug)
+                {
+                    logConfig = logConfig.MinimumLevel.Debug();
+                }
+                else
+                {
+                    logConfig = logConfig.MinimumLevel.Information();
+                }
+
+                _logger = logConfig
                     .WriteTo.File(logFile,
-                        rollingInterval: RollingInterval.Day,
+                        rollingInterval: isDebug ? RollingInterval.Infinite : RollingInterval.Day, // Debug 不滚动
                         retainedFileCountLimit: 7,
                         fileSizeLimitBytes: 10 * 1024 * 1024, // 10 MB 每个文件 / 10 MB per file
                         rollOnFileSizeLimit: false, // 不按大小滚动，只按天滚动 / Daily rolling only
                         shared: true, // 允许多进程共享文件 / Allow multi-process sharing
-                        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
+                        outputTemplate: "{Timestamp:HH:mm:ss.fff} [{Level:u3}] {Message:lj}{NewLine}{Exception}")
                     .CreateLogger();
 
                 // 同时设置 Serilog 的静态 Log 实例，以便正确调用 CloseAndFlush / Set Serilog Log singleton
                 Log.Logger = _logger;
 
-                _logger.Information($"Claude Code for VS Extension Started (Mode: {(IsDebugMode() ? "Debug" : "Release")})");
+                _logger.Information($"=== Claude Code for VS Started ({(isDebug ? "DEBUG" : "Release")}) ===");
             }
             catch (Exception ex)
             {

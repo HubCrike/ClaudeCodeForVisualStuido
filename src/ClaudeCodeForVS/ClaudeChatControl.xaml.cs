@@ -1,4 +1,4 @@
-﻿using ClaudeCodeForVS.Models;
+using ClaudeCodeForVS.Models;
 using ClaudeCodeForVS.Services;
 using ClaudeCodeForVS.ViewModels;
 using Microsoft.VisualStudio.PlatformUI;
@@ -108,6 +108,7 @@ namespace ClaudeCodeForVS
         {
             _viewModel.Messages.CollectionChanged += OnMessagesCollectionChanged;
             _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+            _viewModel.OnPermissionRequest += OnViewModelPermissionRequest;
 
             foreach (var message in _viewModel.Messages)
             {
@@ -119,11 +120,17 @@ namespace ClaudeCodeForVS
         {
             _viewModel.Messages.CollectionChanged -= OnMessagesCollectionChanged;
             _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+            _viewModel.OnPermissionRequest -= OnViewModelPermissionRequest;
 
             foreach (var message in _viewModel.Messages)
             {
                 UnhookMessage(message);
             }
+        }
+
+        private void OnViewModelPermissionRequest(string requestId, string toolName, object toolInput, string description, string risk)
+        {
+            _ = SendPermissionRequestAsync(requestId, toolName, toolInput, description, risk);
         }
 
         private void HookMessage(ChatMessage message)
@@ -330,6 +337,16 @@ namespace ClaudeCodeForVS
                     _ = SendProjectFilesAsync();
                     return;
                 }
+
+                // 处理权限响应
+                if (string.Equals(type, "permissionResponse", StringComparison.OrdinalIgnoreCase))
+                {
+                    var requestId = msg.Value<string>("requestId");
+                    var decision = msg.Value<string>("decision");
+                    var reason = msg.Value<string>("reason");
+                    _ = HandlePermissionResponseAsync(requestId, decision, reason);
+                    return;
+                }
             }
             catch (Exception ex)
             {
@@ -436,6 +453,66 @@ namespace ClaudeCodeForVS
             catch (Exception ex)
             {
                 LogService.Debug($"[SendProjectFilesAsync] Error: {ex.Message}");
+            }
+        }
+
+        private async Task HandlePermissionResponseAsync(string requestId, string decision, string reason)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(decision))
+                {
+                    LogService.Warn("[HandlePermissionResponseAsync] Invalid permission response: missing requestId or decision");
+                    return;
+                }
+
+                await ClaudeAgentBridge.Instance.RespondToPermissionAsync(requestId, decision, reason);
+                LogService.Debug($"[HandlePermissionResponseAsync] Sent permission response: {requestId} = {decision}");
+            }
+            catch (Exception ex)
+            {
+                LogService.Error($"[HandlePermissionResponseAsync] Failed to send permission response", ex);
+            }
+        }
+
+        /// <summary>
+        /// 发送权限请求到前端
+        /// </summary>
+        internal async Task SendPermissionRequestAsync(string requestId, string toolName, object toolInput, string description, string risk)
+        {
+            try
+            {
+                // 确保在 UI 线程上执行 WebView2 操作
+                await Dispatcher.InvokeAsync(async () =>
+                {
+                    try
+                    {
+                        if (Browser?.CoreWebView2 == null)
+                            return;
+
+                        var payload = new
+                        {
+                            type = "permissionRequest",
+                            requestId,
+                            toolName,
+                            toolInput,
+                            description,
+                            risk
+                        };
+
+                        var json = JsonConvert.SerializeObject(payload);
+                        LogService.Debug($"[SendPermissionRequestAsync] Sending permission request: {toolName}");
+                        await Browser.CoreWebView2.ExecuteScriptAsync($"window.postMessage({json}, '*');");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogService.Error("[SendPermissionRequestAsync] Failed to send permission request (inner)", ex);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("[SendPermissionRequestAsync] Failed to send permission request", ex);
             }
         }
 

@@ -1,8 +1,9 @@
-﻿using ClaudeCodeForVS.Models;
+using ClaudeCodeForVS.Models;
 using ClaudeCodeForVS.Services;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
@@ -22,13 +23,22 @@ namespace ClaudeCodeForVS.ViewModels
         private bool _isRunning;
         private CancellationTokenSource _cts;
 
+        // 当前会话 ID / Current session ID
+        private string _currentSessionId;
+
         // UI 更新节流 / UI update throttling
         private static readonly TimeSpan UIUpdateInterval = TimeSpan.FromMilliseconds(50);
 
         // 使用无锁并发队列代替 StringBuilder + lock，避免调试时死锁 / Use lock-free queue to avoid debug deadlocks
         private readonly ConcurrentQueue<string> _pendingContent = new ConcurrentQueue<string>();
+
         private DispatcherTimer _updateTimer;
         private ChatMessage _currentAssistantMessage;
+
+        /// <summary>
+        /// 权限请求事件，UI 层需要订阅此事件来显示权限对话框
+        /// </summary>
+        public event Action<string, string, object, string, string> OnPermissionRequest;
 
         public ChatViewModel()
         {
@@ -38,6 +48,7 @@ namespace ClaudeCodeForVS.ViewModels
             UserInput = string.Empty;
 
             InitializeUpdateTimer();
+            SubscribeToAgentBridgeEvents();
         }
 
         private void InitializeUpdateTimer()
@@ -47,6 +58,62 @@ namespace ClaudeCodeForVS.ViewModels
                 Interval = UIUpdateInterval
             };
             _updateTimer.Tick += OnUpdateTimerTick;
+        }
+
+        private void SubscribeToAgentBridgeEvents()
+        {
+            ClaudeAgentBridge.Instance.OnAgentEvent += HandleAgentEvent;
+            ClaudeAgentBridge.Instance.OnPermissionRequest += HandlePermissionRequest;
+        }
+
+        private void HandleAgentEvent(JObject eventData)
+        {
+            if (eventData == null)
+                return;
+
+            // 将原生 SDK 事件直接序列化为 JSON 行，追加到消息内容
+            // 前端的 TimelineMessage.vue 会解析这些 JSON 行并渲染
+            // 
+            // SDK 事件格式示例：
+            // - stream_event: { type: "stream_event", event: { type: "content_block_delta", delta: { text: "..." } } }
+            // - assistant: { type: "assistant", message: { content: [...] } }
+            // - result: { type: "result", subtype: "success", ... }
+            // - error: { type: "result", subtype: "error_during_execution", errors: [...] }
+            
+            var eventType = eventData["type"]?.Value<string>();
+            
+            // 过滤掉不需要显示的事件
+            // - query_start/query_end: 内部控制事件
+            // - assistant: 完整消息，与 stream_event 重复，不需要显示
+            // - system: 系统初始化消息，不需要显示
+            // - user: 用户消息已经单独显示，不需要重复
+            if (eventType == "query_start" || eventType == "query_end" || 
+                eventType == "assistant" || eventType == "system" || eventType == "user")
+            {
+                return;
+            }
+
+            // 将整个事件序列化为一行 JSON，追加到消息内容
+            var jsonLine = eventData.ToString(Newtonsoft.Json.Formatting.None);
+            _pendingContent.Enqueue(jsonLine + "\n");
+        }
+
+        private void HandlePermissionRequest(JObject requestData)
+        {
+            if (requestData == null)
+                return;
+
+            var requestId = requestData["requestId"]?.Value<string>();
+            var toolName = requestData["toolName"]?.Value<string>();
+            var toolInput = requestData["toolInput"] as JObject;
+            var description = requestData["description"]?.Value<string>();
+            var risk = requestData["risk"]?.Value<string>() ?? "medium";
+
+            if (!string.IsNullOrEmpty(requestId) && !string.IsNullOrEmpty(toolName))
+            {
+                // 触发权限请求事件，由 UI 层处理
+                OnPermissionRequest?.Invoke(requestId, toolName, toolInput, description, risk);
+            }
         }
 
         private void OnUpdateTimerTick(object sender, EventArgs e)
@@ -154,12 +221,7 @@ namespace ClaudeCodeForVS.ViewModels
                 try
                 {
                     var workingDir = await GetSolutionDirectoryAsync();
-
-                    await ClaudeCodeCommandService.Instance.RunAsync(prompt, workingDir, (output) =>
-                    {
-                        // 使用无锁队列累积内容，避免调试时死锁 / Queue content to avoid debug deadlocks
-                        _pendingContent.Enqueue(output + "\n");
-                    }, _cts.Token);
+                    await RunWithAgentBridgeAsync(prompt, workingDir, assistantMessage);
                 }
                 catch (OperationCanceledException)
                 {
@@ -191,55 +253,64 @@ namespace ClaudeCodeForVS.ViewModels
             }
         }
 
+        /// <summary>
+        /// 使用 Agent SDK Bridge 执行查询
+        /// </summary>
+        private async Task RunWithAgentBridgeAsync(string prompt, string workingDir, ChatMessage assistantMessage)
+        {
+            var bridge = ClaudeAgentBridge.Instance;
+
+            // 初始化 Bridge - 现在会抛出详细异常
+            var initialized = await bridge.InitializeAsync(workingDir, _cts.Token);
+            if (!initialized)
+            {
+                throw new Exception("Failed to initialize Claude Agent Bridge. InitializeAsync returned false.");
+            }
+
+            // 发送查询
+            var response = await bridge.QueryAsync(prompt, _currentSessionId, _cts.Token);
+
+            // 处理响应
+            if (response != null)
+            {
+                var result = response["result"];
+                if (result != null)
+                {
+                    // 更新会话 ID
+                    _currentSessionId = result["sessionId"]?.Value<string>();
+
+                    // 获取响应文本
+                    var responseText = result["response"]?.Value<string>();
+                    if (!string.IsNullOrEmpty(responseText))
+                    {
+                        _pendingContent.Enqueue(responseText);
+                    }
+
+                    // 检查是否有错误
+                    var error = result["error"]?.Value<string>();
+                    if (!string.IsNullOrEmpty(error))
+                    {
+                        _pendingContent.Enqueue($"\n[SDK Error]: {error}");
+                    }
+                }
+
+                // 检查顶级错误
+                var topError = response["error"];
+                if (topError != null)
+                {
+                    var errorMessage = topError["message"]?.Value<string>() ?? "Unknown error";
+                    throw new Exception($"Agent Bridge error: {errorMessage}");
+                }
+            }
+        }
+
         private async Task ReloadChangedFilesAsync()
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
-            var modifiedFiles = ClaudeCodeCommandService.Instance.ModifiedFiles;
-            if (modifiedFiles == null || modifiedFiles.Count == 0)
-            {
-                LogService.Debug("No files to reload");
-                return;
-            }
-
-            var rdt = ServiceProvider.GlobalProvider.GetService(typeof(SVsRunningDocumentTable)) as IVsRunningDocumentTable;
-            if (rdt == null)
-                return;
-
-            var reloadedCount = 0;
-            foreach (var filePath in modifiedFiles)
-            {
-                try
-                {
-                    // 规范化路径 / Normalize path
-                    var normalizedPath = System.IO.Path.GetFullPath(filePath);
-
-                    // 通过路径查找文档 / Find document by path
-                    if (rdt.FindAndLockDocument((uint)_VSRDTFLAGS.RDT_NoLock, normalizedPath, out _, out _, out var docDataPtr, out var cookie) == VSConstants.S_OK && docDataPtr != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            var docData = System.Runtime.InteropServices.Marshal.GetObjectForIUnknown(docDataPtr);
-                            if (docData is IVsPersistDocData persistDocData)
-                            {
-                                persistDocData.ReloadDocData(0);
-                                reloadedCount++;
-                                LogService.Debug($"Reloaded: {filePath}");
-                            }
-                        }
-                        finally
-                        {
-                            System.Runtime.InteropServices.Marshal.Release(docDataPtr);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogService.Warn($"Failed to reload file: {filePath}", ex);
-                }
-            }
-
-            LogService.Info($"Reloaded {reloadedCount} of {modifiedFiles.Count} modified files");
+            // TODO: Agent SDK Bridge 需要实现文件变更跟踪
+            // 目前 SDK 模式下暂不支持自动重新加载
+            LogService.Debug("ReloadChangedFilesAsync called (not implemented for SDK mode)");
         }
 
         private async Task<string> GetSolutionDirectoryAsync()
@@ -258,11 +329,21 @@ namespace ClaudeCodeForVS.ViewModels
             return IsRunning;
         }
 
-        private void OnCancel(object parameter)
+        private async void OnCancel(object parameter)
         {
             if (CanCancel(parameter))
             {
                 _cts?.Cancel();
+
+                // 取消 Agent Bridge 的查询
+                try
+                {
+                    await ClaudeAgentBridge.Instance.CancelAsync("User cancelled");
+                }
+                catch (Exception ex)
+                {
+                    LogService.Warn("Failed to cancel Agent Bridge query", ex);
+                }
             }
         }
 

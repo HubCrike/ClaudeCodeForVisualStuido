@@ -78,6 +78,15 @@ const isExpanded = (id: string) => expandedItems.has(id)
 const parsedLineCount = ref(0)
 const cachedItems = ref<TimelineItem[]>([])
 
+/**
+ * 解析消息内容为时间线项目
+ * 
+ * 支持的事件格式（来自 @anthropic-ai/claude-agent-sdk）：
+ * 1. stream_event: { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "..." } } }
+ * 2. assistant: { type: "assistant", message: { content: [{ type: "text", text: "..." }, { type: "tool_use", ... }] } }
+ * 3. result: { type: "result", subtype: "success" | "error_during_execution", ... }
+ * 4. system: { type: "system", ... }
+ */
 const items = computed(() => {
   const lines = props.content.split('\n').filter(l => l.trim())
   
@@ -107,11 +116,15 @@ const items = computed(() => {
     const json = safeJsonParse<any>(line)
     
     if (!json) {
+        // 非 JSON 行，作为普通文本处理
         currentText += (currentText ? '\n' : '') + line
         continue
     }
-      
-    if (json.type === 'stream_event') {
+    
+    const eventType = json.type
+    
+    // 处理 stream_event（流式增量事件）
+    if (eventType === 'stream_event') {
         const event = json.event
         if (!event) continue
         
@@ -129,23 +142,72 @@ const items = computed(() => {
             }
         } else if (event.type === 'content_block_delta') {
             if (event.delta?.type === 'text_delta') {
-                currentText += event.delta.text
+                currentText += event.delta.text || ''
             } else if (event.delta?.type === 'input_json_delta') {
                 if (currentTool) {
-                    currentTool.input = (currentTool.input || '') + event.delta.partial_json
+                    currentTool.input = (currentTool.input || '') + (event.delta.partial_json || '')
                 }
             }
         } else if (event.type === 'content_block_stop') {
             currentTool = null
         }
-    } 
-    else if (json.type === 'error') {
-        pushText()
-        result.push({ 
-            type: 'error', 
-            content: json.error?.message || 'Unknown error',
-            uniqueId: `error-${result.length}`
-        })
+    }
+    // 处理 assistant 消息（完整的 assistant 响应）
+    else if (eventType === 'assistant') {
+        const message = json.message
+        if (message?.content) {
+            for (const block of message.content) {
+                if (block.type === 'text') {
+                    currentText += (currentText ? '\n' : '') + (block.text || '')
+                } else if (block.type === 'tool_use') {
+                    pushText()
+                    result.push({
+                        type: 'tool_use',
+                        name: block.name,
+                        input: typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2),
+                        id: block.id,
+                        uniqueId: block.id || `tool-${result.length}`
+                    })
+                }
+            }
+        }
+    }
+    // 处理 result 事件（查询完成）
+    else if (eventType === 'result') {
+        if (json.subtype === 'error_during_execution' || json.is_error) {
+            pushText()
+            const errorMessages = json.errors?.join(', ') || 'Unknown error'
+            result.push({ 
+                type: 'error', 
+                content: errorMessages,
+                uniqueId: `error-${result.length}`
+            })
+        }
+        // success 结果通常不需要特殊显示，文本已经通过 stream_event 显示了
+    }
+    // 处理 user 消息（通常不在 assistant 消息内容中）
+    else if (eventType === 'user') {
+        // 忽略 user 消息，它们已经在 ChatMessage 中单独显示
+    }
+    // 处理 system 消息
+    else if (eventType === 'system') {
+        // 系统消息通常不需要显示
+    }
+    // 处理 tool_progress（工具执行进度）
+    else if (eventType === 'tool_progress') {
+        // 可以选择显示进度，暂时忽略
+    }
+    // 其他未知事件类型，尝试提取有用信息
+    else {
+        // 如果有 errors 数组，显示为错误
+        if (json.errors && Array.isArray(json.errors) && json.errors.length > 0) {
+            pushText()
+            result.push({ 
+                type: 'error', 
+                content: json.errors.join(', '),
+                uniqueId: `error-${result.length}`
+            })
+        }
     }
   }
   

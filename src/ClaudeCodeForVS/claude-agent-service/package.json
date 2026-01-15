@@ -1,0 +1,28 @@
+{
+  "name": "claude-agent-service",
+  "version": "1.0.0",
+  "description": "Claude Agent SDK bridge service for ClaudeCodeForVS",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=../wwwroot/claude-agent/index.js --external:sharp",
+    "build:dev": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": true
+}

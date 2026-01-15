@@ -91,6 +91,20 @@
                 </div>
             </div>
         </footer>
+
+        <!-- 权限请求对话框 -->
+        <PermissionDialog
+            v-if="permissionRequest"
+            :show="!!permissionRequest"
+            :request-id="permissionRequest.requestId"
+            :tool-name="permissionRequest.toolName"
+            :tool-input="permissionRequest.toolInput"
+            :description="permissionRequest.description"
+            :risk="permissionRequest.risk"
+            @allow="onPermissionAllow"
+            @allow-always="onPermissionAllowAlways"
+            @deny="onPermissionDeny"
+        />
     </div>
 </template>
 
@@ -100,6 +114,7 @@ import 'highlight.js/styles/vs2015.css' // VS 2015 dark theme, better matches VS
 import WelcomeScreen from './components/WelcomeScreen.vue'
 import TimelineMessage from './components/TimelineMessage.vue'
 import FilePicker from './components/FilePicker.vue'
+import PermissionDialog from './components/PermissionDialog.vue'
 import { renderMarkdown } from './utils/markdown'
 
 type EditorContext = {
@@ -131,6 +146,14 @@ type FileItem = {
     directory: string
 }
 
+type PermissionRequestData = {
+    requestId: string
+    toolName: string
+    toolInput: Record<string, unknown>
+    description?: string
+    risk: 'low' | 'medium' | 'high'
+}
+
 type HostStatePayload = {
     type: 'state'
     isRunning: boolean
@@ -139,6 +162,7 @@ type HostStatePayload = {
 const showFilePicker = ref(false)
 const projectFiles = ref<FileItem[]>([])
 const atSignPosition = ref<number>(-1)
+const permissionRequest = ref<PermissionRequestData | null>(null)
 
 const chatEl = ref<HTMLDivElement | null>(null)
 const composerRef = ref<HTMLDivElement | null>(null)
@@ -340,6 +364,29 @@ function onFileSelect(file: FileItem) {
     })
 }
 
+// 权限响应处理
+function sendPermissionResponse(requestId: string, decision: 'allow' | 'deny' | 'allowAlways', reason?: string) {
+    post({
+        type: 'permissionResponse',
+        requestId,
+        decision,
+        reason
+    })
+    permissionRequest.value = null
+}
+
+function onPermissionAllow(requestId: string) {
+    sendPermissionResponse(requestId, 'allow')
+}
+
+function onPermissionAllowAlways(requestId: string) {
+    sendPermissionResponse(requestId, 'allowAlways')
+}
+
+function onPermissionDeny(requestId: string) {
+    sendPermissionResponse(requestId, 'deny')
+}
+
 function handleChatClick(e: MouseEvent) {
     const target = (e.target as HTMLElement).closest('.copy-btn');
     if (target) {
@@ -384,6 +431,16 @@ onMounted(() => {
                 const files = (data as any).files || []
                 projectFiles.value = files
             }
+            if ((data as any).type === 'permissionRequest') {
+                const req = data as any
+                permissionRequest.value = {
+                    requestId: req.requestId,
+                    toolName: req.toolName,
+                    toolInput: req.toolInput || {},
+                    description: req.description,
+                    risk: req.risk || 'medium'
+                }
+            }
         })
 
         post({ type: 'requestState' })
@@ -405,6 +462,15 @@ onMounted(() => {
             const files = data.files || []
             projectFiles.value = files
             console.log('[App] Received projectFiles:', files)
+        }
+        if (data.type === 'permissionRequest') {
+            permissionRequest.value = {
+                requestId: data.requestId,
+                toolName: data.toolName,
+                toolInput: data.toolInput || {},
+                description: data.description,
+                risk: data.risk || 'medium'
+            }
         }
     })
 })

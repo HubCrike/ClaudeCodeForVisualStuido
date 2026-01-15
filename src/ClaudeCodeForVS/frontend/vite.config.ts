@@ -7,7 +7,7 @@ export default defineConfig({
   // Output build artifacts directly into the VSIX-packaged wwwroot folder
   build: {
     outDir: path.resolve(__dirname, '../wwwroot'),
-    emptyOutDir: true,
+    emptyOutDir: false, // 不清空目录，避免删除 claude-agent
     sourcemap: false,
     rollupOptions: {
       output: {
