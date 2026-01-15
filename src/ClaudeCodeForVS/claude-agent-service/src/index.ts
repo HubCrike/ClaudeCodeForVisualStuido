@@ -24,6 +24,7 @@ import {
 import { logger } from './utils/logger.js';
 import { getAgent, type PermissionRequest, type PermissionDecision } from './agent.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { tmpdir } from 'os';
 
 const VERSION = '1.0.0';
 
@@ -41,6 +42,10 @@ class ClaudeAgentService {
   constructor() {
     this.server = new IpcServer();
     this.registerHandlers();
+    logger.info('Service initialized', { 
+      tempDir: tmpdir(), 
+      platform: process.platform 
+    });
   }
 
   private registerHandlers(): void {

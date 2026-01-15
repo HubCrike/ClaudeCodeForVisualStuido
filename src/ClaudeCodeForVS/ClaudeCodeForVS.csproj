@@ -57,7 +57,7 @@
     </Compile>
     <Compile Include="ClaudeChatCommand.cs" />
     <Compile Include="Services\ClaudeAgentBridge.cs" />
-    <Compile Include="Services\ClaudeCodeCommandService.cs" />
+    <Compile Include="Services\WindowsCommandResolver.cs" />
     <Compile Include="Services\EditorContextService.cs" />
     <Compile Include="Services\LogService.cs" />
     <Compile Include="ViewModels\ChatViewModel.cs" />

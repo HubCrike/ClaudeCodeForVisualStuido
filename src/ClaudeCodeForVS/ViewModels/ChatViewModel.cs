@@ -1,4 +1,4 @@
-using ClaudeCodeForVS.Models;
+﻿using ClaudeCodeForVS.Models;
 using ClaudeCodeForVS.Services;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
@@ -73,21 +73,21 @@ namespace ClaudeCodeForVS.ViewModels
 
             // 将原生 SDK 事件直接序列化为 JSON 行，追加到消息内容
             // 前端的 TimelineMessage.vue 会解析这些 JSON 行并渲染
-            // 
+            //
             // SDK 事件格式示例：
             // - stream_event: { type: "stream_event", event: { type: "content_block_delta", delta: { text: "..." } } }
             // - assistant: { type: "assistant", message: { content: [...] } }
             // - result: { type: "result", subtype: "success", ... }
             // - error: { type: "result", subtype: "error_during_execution", errors: [...] }
-            
+
             var eventType = eventData["type"]?.Value<string>();
-            
+
             // 过滤掉不需要显示的事件
             // - query_start/query_end: 内部控制事件
             // - assistant: 完整消息，与 stream_event 重复，不需要显示
             // - system: 系统初始化消息，不需要显示
             // - user: 用户消息已经单独显示，不需要重复
-            if (eventType == "query_start" || eventType == "query_end" || 
+            if (eventType == "query_start" || eventType == "query_end" ||
                 eventType == "assistant" || eventType == "system" || eventType == "user")
             {
                 return;

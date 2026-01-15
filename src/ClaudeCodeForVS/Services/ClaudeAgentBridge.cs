@@ -19,6 +19,8 @@ namespace ClaudeCodeForVS.Services
     /// </summary>
     public class ClaudeAgentBridge : IDisposable
     {
+        public static readonly Guid ClaudeCodePaneGuid = new Guid("A8F925EA-4515-4BBA-92E3-BB69C995AEEC");
+
         private static readonly Lazy<ClaudeAgentBridge> _instance = new Lazy<ClaudeAgentBridge>(() => new ClaudeAgentBridge());
         public static ClaudeAgentBridge Instance => _instance.Value;
 
@@ -301,6 +303,25 @@ namespace ClaudeCodeForVS.Services
 
             // 设置环境变量
             startInfo.EnvironmentVariables["LOG_LEVEL"] = "info";
+
+            try
+            {
+                // 设置专用临时目录，防止污染用户项目目录 / Set dedicated temp dir to avoid polluting project dir
+                // 这解决了 claude-code 可能在 CWD 生成 -cwd 临时文件的问题
+                var tempDir = Path.Combine(_workingDirectory, ".claude", "temp");
+                if (!Directory.Exists(tempDir))
+                {
+                    Directory.CreateDirectory(tempDir);
+                }
+                startInfo.EnvironmentVariables["TEMP"] = tempDir;
+                startInfo.EnvironmentVariables["TMP"] = tempDir;
+                startInfo.EnvironmentVariables["TMPDIR"] = tempDir;
+                LogService.Debug($"[Bridge] Set TEMP/TMP/TMPDIR to: {tempDir}");
+            }
+            catch (Exception ex)
+            {
+                LogService.Warn($"[Bridge] Failed to set custom temp directory: {ex.Message}");
+            }
 
             _processCts = new CancellationTokenSource();
             _process = new Process { StartInfo = startInfo };

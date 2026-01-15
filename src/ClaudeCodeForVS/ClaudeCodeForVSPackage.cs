@@ -1,4 +1,4 @@
-﻿using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell;
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -64,7 +64,7 @@ namespace ClaudeCodeForVS
                 {
                     if (await GetServiceAsync(typeof(SVsOutputWindow)) is IVsOutputWindow outputWindow)
                     {
-                        var guid = ClaudeCodeCommandService.ClaudeCodePaneGuid;
+                        var guid = ClaudeAgentBridge.ClaudeCodePaneGuid;
                         outputWindow.CreatePane(ref guid, "Claude Code", 1, 1);
                         LogService.Debug("Output window pane created");
                     }

@@ -17031,6 +17031,7 @@ function getAgent() {
 }
 
 // src/index.ts
+import { tmpdir } from "os";
 var VERSION = "1.0.0";
 var ClaudeAgentService = class {
   server;
@@ -17041,6 +17042,10 @@ var ClaudeAgentService = class {
   constructor() {
     this.server = new IpcServer();
     this.registerHandlers();
+    logger.info("Service initialized", {
+      tempDir: tmpdir(),
+      platform: process.platform
+    });
   }
   registerHandlers() {
     this.server.onRequest(
