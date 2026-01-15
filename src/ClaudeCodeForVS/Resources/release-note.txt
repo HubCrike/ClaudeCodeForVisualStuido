@@ -1,4 +1,9 @@
-# ClaudeCodeForVS 更新日志
+﻿# ClaudeCodeForVS 更新日志
+
+## v2.0.0 (2026-02-15)
+
+### 功能
+	基于Claude Agent SDK 重新实现插件，支持权限确认。
 
 ## v1.3.10 (2026-01-09)
 

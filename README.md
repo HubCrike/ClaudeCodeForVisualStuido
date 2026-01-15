@@ -25,6 +25,7 @@
 - **Visual Studio** 2022 或 2026（⭐ 推荐 2026 以获得最佳体验）
 - **WebView2 运行时**（现代 Visual Studio 已自带）
 - **Node.js** v20 或更高版本（用于运行 Claude Agent Service）
+- **Claude API 凭据**（至少设置 `ANTHROPIC_API_KEY`，也可通过配置文件提供）
 
 ## 🚀 安装方式
 
@@ -40,9 +41,13 @@
 
 ## ⚙️ 配置说明
 
-- 扩展使用内置的 Agent SDK Service (Node.js)
-- 请确保系统已安装 Node.js 且 `node` 命令可用
-- 首次使用可能需要配置 Claude API 密钥
+- 配置文件路径：`~/.claude/settings.json`
+  - Windows 示例：`C:\Users\<用户名>\.claude\settings.json`
+- 支持在配置文件或系统环境变量中设置：
+  - `ANTHROPIC_API_KEY`
+  - `ANTHROPIC_AUTH_TOKEN`
+  - `ANTHROPIC_BASE_URL`
+- 扩展使用内置的 Agent SDK Service (Node.js)，请确保系统已安装 Node.js 且 `node` 命令可用
 
 ## 📋 日志位置
 
