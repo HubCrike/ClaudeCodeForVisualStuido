@@ -15,7 +15,8 @@
 - 📜 **历史会话管理** - 历史会话分为**当前项目**和**全部**两个视图：
   - 点击某个历史会话，即可继续之前的上下文继续对话
   - 支持删除不再需要的历史会话
-  - 
+<img width="558" height="596" alt="ScreenShot_2026-09-08_162916_582" src="https://github.com/user-attachments/assets/26147a45-8ade-4829-b12d-8a62ba591930" />
+<img width="791" height="264" alt="ScreenShot_2026-09-08_171020_327" src="https://github.com/user-attachments/assets/9cc68614-e9ee-485e-9c1e-95234d6739cb" />
 
 ## 🔧 环境要求
 
@@ -24,11 +25,6 @@
 - **WebView2 运行时**（现代 Visual Studio 已自带）
 - **Node.js** v20 或更高版本（用于运行 Claude Agent Service）
 - **Claude API 凭据**（`ANTHROPIC_API_KEY` 等）
-<img width="558" height="596" alt="ScreenShot_2026-09-08_162916_582" src="https://github.com/user-attachments/assets/26147a45-8ade-4829-b12d-8a62ba591930" />
-<img width="370" height="536" alt="ScreenShot_2026-09-08_164327_131" src="https://github.com/user-attachments/assets/e202b10f-8d71-4e60-83d7-b11c2045d42f" />
-<img width="370" height="536" alt="ScreenShot_2026-09-08_164227_413" src="https://github.com/user-attachments/assets/8d151db9-3ced-4ac2-9c45-b3991eeb5f06" />
-
-
 
 ## 🚀 安装方式
 
