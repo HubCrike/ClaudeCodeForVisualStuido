@@ -1,5 +1,21 @@
 <template>
     <div class="root">
+        <!-- 顶部工具栏：会话管理 -->
+        <header class="topbar">
+            <button class="topbar-btn" title="新建会话（清空当前上下文）" @click="newSession">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M14 7v1H9v5H8V8H3V7h5V2h1v5h5z" />
+                </svg>
+                <span>新建会话</span>
+            </button>
+            <button class="topbar-btn" title="查看历史会话" @click="openSessions">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM2 8a6 6 0 1112 0A6 6 0 012 8zm6-4v4.25l3 1.8-.5.84L7.5 8.75V4H8z" />
+                </svg>
+                <span>历史会话</span>
+            </button>
+        </header>
+
         <main ref="chatEl" class="chat" aria-label="chat messages" @click="handleChatClick">
             <WelcomeScreen v-if="state.messages.length === 0" />
             <template v-else>
@@ -105,6 +121,21 @@
             @allow-always="onPermissionAllowAlways"
             @deny="onPermissionDeny"
         />
+
+        <!-- 历史会话面板 -->
+        <SessionList
+            :show="showSessions"
+            :sessions="sessions"
+            :current-session-id="currentSessionId"
+            :only-current-project="onlyCurrentProject"
+            :loading="sessionsLoading"
+            :error-message="sessionError"
+            :filter-directory="filterDirectory"
+            @close="showSessions = false"
+            @pick="onSessionPick"
+            @remove="onSessionRemove"
+            @change-scope="onSessionScopeChange"
+        />
     </div>
 </template>
 
@@ -115,7 +146,9 @@ import WelcomeScreen from './components/WelcomeScreen.vue'
 import TimelineMessage from './components/TimelineMessage.vue'
 import FilePicker from './components/FilePicker.vue'
 import PermissionDialog from './components/PermissionDialog.vue'
+import SessionList from './components/SessionList.vue'
 import { renderMarkdown } from './utils/markdown'
+import type { SessionItem } from './types'
 
 type EditorContext = {
     filePath: string
@@ -158,11 +191,21 @@ type HostStatePayload = {
     type: 'state'
     isRunning: boolean
     messages: ChatMessage[]
+    currentSessionId?: string | null
 }
 const showFilePicker = ref(false)
 const projectFiles = ref<FileItem[]>([])
 const atSignPosition = ref<number>(-1)
 const permissionRequest = ref<PermissionRequestData | null>(null)
+
+// 会话管理状态
+const showSessions = ref(false)
+const sessions = ref<SessionItem[]>([])
+const currentSessionId = ref<string | null>(null)
+const onlyCurrentProject = ref(true)
+const sessionsLoading = ref(false)
+const sessionError = ref('')
+const filterDirectory = ref<string | null>(null)
 
 const chatEl = ref<HTMLDivElement | null>(null)
 const composerRef = ref<HTMLDivElement | null>(null)
@@ -208,6 +251,9 @@ async function scrollToBottom() {
 function applyHostState(payload: HostStatePayload) {
     state.isRunning = !!payload.isRunning
     state.messages = Array.isArray(payload.messages) ? payload.messages : []
+    if (payload.currentSessionId !== undefined) {
+        currentSessionId.value = payload.currentSessionId || null
+    }
     void scrollToBottom()
 }
 
@@ -387,6 +433,48 @@ function onPermissionDeny(requestId: string) {
     sendPermissionResponse(requestId, 'deny')
 }
 
+// ---------------- 会话管理 ----------------
+
+function newSession() {
+    post({ type: 'newSession' })
+    // 立即清空本地视图，等待宿主回推权威状态
+    state.messages = []
+    currentSessionId.value = null
+    showSessions.value = false
+}
+
+function openSessions() {
+    showSessions.value = true
+    requestSessions()
+}
+
+function requestSessions() {
+    sessionsLoading.value = true
+    sessionError.value = ''
+    post({ type: 'listSessions', onlyCurrentProject: onlyCurrentProject.value })
+}
+
+function onSessionScopeChange(onlyCurrent: boolean) {
+    onlyCurrentProject.value = onlyCurrent
+    requestSessions()
+}
+
+function onSessionPick(sessionId: string) {
+    if (state.isRunning) {
+        sessionError.value = '请先等待当前回答结束'
+        return
+    }
+    sessionError.value = ''
+    post({ type: 'loadSession', sessionId })
+    showSessions.value = false
+}
+
+function onSessionRemove(sessionId: string) {
+    sessionError.value = ''
+    sessionsLoading.value = true
+    post({ type: 'deleteSession', sessionId, onlyCurrentProject: onlyCurrentProject.value })
+}
+
 function handleChatClick(e: MouseEvent) {
     const target = (e.target as HTMLElement).closest('.copy-btn');
     if (target) {
@@ -419,28 +507,7 @@ onMounted(() => {
     const wv = (window as any).chrome?.webview
     if (wv && typeof wv.addEventListener === 'function') {
         wv.addEventListener('message', (ev: MessageEvent) => {
-            const data = ev.data
-            if (!data || typeof data !== 'object') return
-            if ((data as any).type === 'state') {
-                applyHostState(data as HostStatePayload)
-            }
-            if ((data as any).type === 'editorContext') {
-                editorContext.value = (data as any).context
-            }
-            if ((data as any).type === 'projectFiles') {
-                const files = (data as any).files || []
-                projectFiles.value = files
-            }
-            if ((data as any).type === 'permissionRequest') {
-                const req = data as any
-                permissionRequest.value = {
-                    requestId: req.requestId,
-                    toolName: req.toolName,
-                    toolInput: req.toolInput || {},
-                    description: req.description,
-                    risk: req.risk || 'medium'
-                }
-            }
+            handleHostMessage(ev.data)
         })
 
         post({ type: 'requestState' })
@@ -453,17 +520,31 @@ onMounted(() => {
 
     // 监听window.postMessage（用于接收来自C#的消息）
     window.addEventListener('message', (ev: MessageEvent) => {
-        const data = ev.data
-        if (!data || typeof data !== 'object') return
-        if (data.type === 'editorContext') {
+        handleHostMessage(ev.data)
+    })
+})
+
+/**
+ * 统一处理来自宿主(C#)的消息
+ * WebView2 与 window.postMessage 两条通道共用此逻辑
+ */
+function handleHostMessage(data: any) {
+    if (!data || typeof data !== 'object') return
+
+    switch (data.type) {
+        case 'state':
+            applyHostState(data as HostStatePayload)
+            break
+
+        case 'editorContext':
             editorContext.value = data.context
-        }
-        if (data.type === 'projectFiles') {
-            const files = data.files || []
-            projectFiles.value = files
-            console.log('[App] Received projectFiles:', files)
-        }
-        if (data.type === 'permissionRequest') {
+            break
+
+        case 'projectFiles':
+            projectFiles.value = data.files || []
+            break
+
+        case 'permissionRequest':
             permissionRequest.value = {
                 requestId: data.requestId,
                 toolName: data.toolName,
@@ -471,9 +552,25 @@ onMounted(() => {
                 description: data.description,
                 risk: data.risk || 'medium'
             }
-        }
-    })
-})
+            break
+
+        case 'sessions':
+            sessions.value = Array.isArray(data.sessions) ? data.sessions : []
+            currentSessionId.value = data.currentSessionId || null
+            filterDirectory.value = data.filterDirectory || null
+            if (typeof data.onlyCurrentProject === 'boolean') {
+                onlyCurrentProject.value = data.onlyCurrentProject
+            }
+            sessionsLoading.value = false
+            sessionError.value = ''
+            break
+
+        case 'sessionError':
+            sessionError.value = data.message || '操作失败'
+            sessionsLoading.value = false
+            break
+    }
+}
 </script>
 
 <style scoped>
@@ -482,6 +579,37 @@ onMounted(() => {
     display: flex;
     flex-direction: column;
     background: var(--bg);
+    color: var(--vscode-editor-foreground);
+}
+
+/* 顶部工具栏 */
+.topbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
+    background: var(--vscode-editor-background);
+    flex-shrink: 0;
+}
+
+.topbar-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: transparent;
+    border: none;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11.5px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+}
+
+.topbar-btn:hover {
+    background: var(--vscode-toolbar-hoverBackground);
     color: var(--vscode-editor-foreground);
 }
 

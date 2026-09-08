@@ -18,6 +18,10 @@ import {
   PermissionResponseResult,
   ListSessionsParams,
   ListSessionsResult,
+  DeleteSessionParams,
+  DeleteSessionResult,
+  SessionHistoryParams,
+  SessionHistoryResult,
   ResumeSessionParams,
   ResumeSessionResult,
 } from './ipc/types.js';
@@ -242,12 +246,73 @@ class ClaudeAgentService {
     this.server.onRequest<ListSessionsParams, ListSessionsResult>(
       Methods.LIST_SESSIONS,
       async (params) => {
-        logger.info('List sessions request received', { limit: params.limit });
-        
+        const allProjects = params.allProjects === true;
+        // 只有非空字符串才是有效的过滤目录，避免 null/'' 被误当作有效值
+        const requestedCwd =
+          typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd.trim() : undefined;
+        const effectiveCwd = allProjects
+          ? undefined
+          : requestedCwd ?? this.workingDirectory ?? undefined;
+
+        logger.info('List sessions request received', {
+          limit: params.limit,
+          allProjects,
+          requestedCwd,
+          effectiveCwd,
+        });
+
+        // 要求按项目过滤但拿不到任何目录时返回空列表，
+        // 避免静默降级成"全部会话"而误导使用者
+        if (!allProjects && !effectiveCwd) {
+          logger.warn('Project-scoped listing requested without a working directory');
+          return { sessions: [] };
+        }
+
         const agent = getAgent();
-        const sessions = await agent.listSessions(params.limit);
-        
-        return { sessions };
+        const sessions = await agent.listSessions(effectiveCwd, params.limit);
+
+        return {
+          sessions: sessions.map((s) => ({
+            sessionId: s.sessionId,
+            createdAt: s.createdAt,
+            lastUpdatedAt: s.lastUpdatedAt,
+            messageCount: s.messageCount,
+            cwd: s.cwd,
+            title: s.title,
+          })),
+        };
+      }
+    );
+
+    // 删除会话
+    this.server.onRequest<DeleteSessionParams, DeleteSessionResult>(
+      Methods.DELETE_SESSION,
+      async (params) => {
+        logger.info('Delete session request received', { sessionId: params.sessionId });
+
+        if (!params.sessionId) {
+          throw new Error('sessionId is required');
+        }
+
+        const agent = getAgent();
+        const deleted = await agent.deleteSession(params.sessionId);
+        return { deleted };
+      }
+    );
+
+    // 会话历史
+    this.server.onRequest<SessionHistoryParams, SessionHistoryResult>(
+      Methods.SESSION_HISTORY,
+      async (params) => {
+        logger.info('Session history request received', { sessionId: params.sessionId });
+
+        if (!params.sessionId) {
+          throw new Error('sessionId is required');
+        }
+
+        const agent = getAgent();
+        const messages = await agent.getSessionHistory(params.sessionId);
+        return { messages };
       }
     );
 

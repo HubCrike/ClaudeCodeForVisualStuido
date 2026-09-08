@@ -26,6 +26,8 @@ var Methods = {
   SHUTDOWN: "shutdown",
   LIST_SESSIONS: "sessions.list",
   RESUME_SESSION: "sessions.resume",
+  DELETE_SESSION: "sessions.delete",
+  SESSION_HISTORY: "sessions.history",
   // 通知方法
   AGENT_EVENT: "agent.event",
   PERMISSION_REQUEST: "permission.request",
@@ -16775,50 +16777,416 @@ function query({
   return queryInstance;
 }
 
+// src/sessions.ts
+import { createReadStream } from "fs";
+import { readdir, stat, unlink } from "fs/promises";
+import { createInterface as createInterface3 } from "readline";
+import { homedir as homedir2 } from "os";
+import { join as join4 } from "path";
+function getProjectsRoot() {
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
+  if (configDir && configDir.trim()) {
+    return join4(configDir.trim(), "projects");
+  }
+  return join4(homedir2(), ".claude", "projects");
+}
+function encodeProjectDirName(cwd2) {
+  return cwd2.replace(/[:\\/]/g, "-");
+}
+function normalizeCwd(p) {
+  return p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+}
+function extractText(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    const parts = [];
+    for (const block of content) {
+      if (block && typeof block === "object") {
+        const b = block;
+        if (b.type === "text" && typeof b.text === "string") {
+          parts.push(b.text);
+        }
+      }
+    }
+    return parts.join("\n");
+  }
+  return "";
+}
+function buildTitle(raw) {
+  let text = raw.replace(/\[track:[^\]]*\]/g, " ").replace(/<command-[^>]*>[\s\S]*?<\/command-[^>]*>/g, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "(\u65E0\u6807\u9898\u4F1A\u8BDD)";
+  }
+  const MAX = 80;
+  if (text.length > MAX) {
+    text = text.slice(0, MAX) + "\u2026";
+  }
+  return text;
+}
+function isConversationLine(obj) {
+  if (obj.isSidechain === true) {
+    return false;
+  }
+  return (obj.type === "user" || obj.type === "assistant") && !!obj.message;
+}
+async function readSessionSummary(filePath, sessionId) {
+  let cwd2 = "";
+  let title = "";
+  let createdAt = 0;
+  let messageCount = 0;
+  const stream = createReadStream(filePath, { encoding: "utf-8" });
+  const rl = createInterface3({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (!line || line.charCodeAt(0) !== 123) {
+        continue;
+      }
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!cwd2 && typeof obj.cwd === "string") {
+        cwd2 = obj.cwd;
+      }
+      if (!isConversationLine(obj)) {
+        continue;
+      }
+      messageCount++;
+      if (!createdAt && typeof obj.timestamp === "string") {
+        const t = Date.parse(obj.timestamp);
+        if (!Number.isNaN(t)) {
+          createdAt = t;
+        }
+      }
+      if (!title && obj.type === "user") {
+        const message = obj.message;
+        const content = message?.content;
+        const isToolResult = Array.isArray(content) && content.some((b) => b && typeof b === "object" && b.type === "tool_result");
+        if (!isToolResult) {
+          const text = extractText(content);
+          if (text.trim()) {
+            title = buildTitle(text);
+          }
+        }
+      }
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  if (messageCount === 0) {
+    return null;
+  }
+  let lastUpdatedAt = createdAt;
+  try {
+    const st = await stat(filePath);
+    lastUpdatedAt = st.mtimeMs;
+  } catch {
+  }
+  return {
+    sessionId,
+    cwd: cwd2,
+    title: title || "(\u65E0\u6807\u9898\u4F1A\u8BDD)",
+    createdAt: createdAt || lastUpdatedAt,
+    lastUpdatedAt,
+    messageCount,
+    filePath
+  };
+}
+async function collectCandidates(root2, dirs) {
+  const candidates = [];
+  for (const dir of dirs) {
+    const dirPath = join4(root2, dir);
+    let files;
+    try {
+      files = await readdir(dirPath);
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.endsWith(".jsonl")) {
+        continue;
+      }
+      const filePath = join4(dirPath, f);
+      try {
+        const st = await stat(filePath);
+        candidates.push({ filePath, sessionId: f.replace(/\.jsonl$/, ""), mtimeMs: st.mtimeMs });
+      } catch {
+      }
+    }
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates;
+}
+async function appendSummaries(candidates, target, limit, scanLimit, seen, results) {
+  let scanned = 0;
+  for (const c of candidates) {
+    if (results.length >= limit || scanned >= scanLimit) {
+      break;
+    }
+    if (seen.has(c.sessionId)) {
+      continue;
+    }
+    scanned++;
+    try {
+      const summary = await readSessionSummary(c.filePath, c.sessionId);
+      if (!summary) {
+        continue;
+      }
+      if (target && summary.cwd && normalizeCwd(summary.cwd) !== target) {
+        continue;
+      }
+      seen.add(c.sessionId);
+      results.push(summary);
+    } catch (error2) {
+      logger.warn("Failed to read session file", { filePath: c.filePath, error: String(error2) });
+    }
+  }
+}
+async function listSessions(cwd2, limit = 50) {
+  const root2 = getProjectsRoot();
+  const effectiveLimit = limit && limit > 0 ? limit : 50;
+  let allDirs;
+  try {
+    const entries = await readdir(root2, { withFileTypes: true });
+    allDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (error2) {
+    logger.warn("Sessions root not accessible", { root: root2, error: String(error2) });
+    return [];
+  }
+  let primaryDirs = allDirs;
+  let secondaryDirs = [];
+  if (cwd2) {
+    const expected = encodeProjectDirName(cwd2).toLowerCase();
+    const matched = allDirs.filter((d) => d.toLowerCase() === expected);
+    if (matched.length > 0) {
+      primaryDirs = matched;
+      secondaryDirs = allDirs.filter((d) => d.toLowerCase() !== expected);
+    }
+  }
+  const target = cwd2 ? normalizeCwd(cwd2) : null;
+  const results = [];
+  const seen = /* @__PURE__ */ new Set();
+  const primaryCandidates = await collectCandidates(root2, primaryDirs);
+  await appendSummaries(
+    primaryCandidates,
+    target,
+    effectiveLimit,
+    Math.max(effectiveLimit * 2, 100),
+    seen,
+    results
+  );
+  if (results.length < effectiveLimit && secondaryDirs.length > 0) {
+    const secondaryCandidates = await collectCandidates(root2, secondaryDirs);
+    await appendSummaries(
+      secondaryCandidates,
+      target,
+      effectiveLimit,
+      Math.max(effectiveLimit * 4, 200),
+      seen,
+      results
+    );
+  }
+  results.sort((a, b) => b.lastUpdatedAt - a.lastUpdatedAt);
+  logger.info("Listed sessions", {
+    root: root2,
+    cwd: cwd2,
+    primaryDirs: primaryDirs.length,
+    secondaryScanned: secondaryDirs.length,
+    returned: results.length
+  });
+  return results;
+}
+async function findSessionFile(sessionId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) {
+    logger.warn("Rejected suspicious sessionId", { sessionId });
+    return null;
+  }
+  const root2 = getProjectsRoot();
+  let dirs;
+  try {
+    const entries = await readdir(root2, { withFileTypes: true });
+    dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return null;
+  }
+  for (const dir of dirs) {
+    const filePath = join4(root2, dir, `${sessionId}.jsonl`);
+    try {
+      await stat(filePath);
+      return filePath;
+    } catch {
+    }
+  }
+  return null;
+}
+async function deleteSession(sessionId) {
+  const filePath = await findSessionFile(sessionId);
+  if (!filePath) {
+    logger.warn("Session file not found for delete", { sessionId });
+    return false;
+  }
+  try {
+    await unlink(filePath);
+    logger.info("Deleted session", { sessionId, filePath });
+    return true;
+  } catch (error2) {
+    logger.error("Failed to delete session", { sessionId, error: String(error2) });
+    return false;
+  }
+}
+async function getSessionHistory(sessionId) {
+  const filePath = await findSessionFile(sessionId);
+  if (!filePath) {
+    logger.warn("Session file not found for history", { sessionId });
+    return [];
+  }
+  const messages = [];
+  const stream = createReadStream(filePath, { encoding: "utf-8" });
+  const rl = createInterface3({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (!line || line.charCodeAt(0) !== 123) {
+        continue;
+      }
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (obj.isSidechain === true) {
+        continue;
+      }
+      const message = obj.message;
+      if (!message) {
+        continue;
+      }
+      if (obj.type === "user") {
+        const content = message.content;
+        const isToolResult = Array.isArray(content) && content.some((b) => b && typeof b === "object" && b.type === "tool_result");
+        if (isToolResult) {
+          continue;
+        }
+        const text = extractText(content);
+        if (text.trim()) {
+          messages.push({ role: "user", content: text });
+        }
+        continue;
+      }
+      if (obj.type === "assistant") {
+        const content = message.content;
+        if (!Array.isArray(content)) {
+          continue;
+        }
+        const blocks = content.filter((b) => {
+          if (!b || typeof b !== "object") return false;
+          const t = b.type;
+          return t === "text" || t === "tool_use";
+        });
+        if (blocks.length === 0) {
+          continue;
+        }
+        const eventLine = JSON.stringify({ type: "assistant", message: { content: blocks } });
+        const last = messages[messages.length - 1];
+        if (last && last.role === "assistant") {
+          last.content += eventLine + "\n";
+        } else {
+          messages.push({ role: "assistant", content: eventLine + "\n" });
+        }
+      }
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  logger.info("Loaded session history", { sessionId, messages: messages.length });
+  return messages;
+}
+
 // src/agent.ts
 import { execSync } from "child_process";
-import { existsSync as existsSync3 } from "fs";
-import { join as join4, dirname as dirname2 } from "path";
+import { existsSync as existsSync3, realpathSync as realpathSync3, openSync as openSync2, readSync as readSync2, closeSync as closeSync2 } from "fs";
+import { join as join6, dirname as dirname2 } from "path";
 function findClaudeExecutable() {
   if (process.platform === "win32") {
     try {
-      const result = execSync("where claude.cmd", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
-      const paths = result.trim().split("\n");
-      for (const p of paths) {
-        const cmdPath = p.trim();
-        if (existsSync3(cmdPath)) {
-          const cmdDir = dirname2(cmdPath);
-          const possiblePaths = [
-            join4(cmdDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
-            join4(cmdDir, "..", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
-            join4(cmdDir, "..", "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js")
-          ];
-          for (const cliPath of possiblePaths) {
-            if (existsSync3(cliPath)) {
-              logger.info("Found Claude CLI cli.js", { path: cliPath });
-              return cliPath;
-            }
+      const result = execSync("where claude", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+      for (const line of result.trim().split("\n")) {
+        const p = line.trim();
+        if (!p || !existsSync3(p)) {
+          continue;
+        }
+        if (/\.exe$/i.test(p)) {
+          logger.info("Found Claude native executable", { path: p });
+          return p;
+        }
+        const cmdDir = dirname2(p);
+        const candidates = [
+          // npm 全局目录结构: <prefix>\node_modules\@anthropic-ai\claude-code\...
+          join6(cmdDir, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
+          join6(cmdDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
+          // 项目内 .bin 目录结构: <proj>\node_modules\.bin\claude.cmd
+          join6(cmdDir, "..", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
+          join6(cmdDir, "..", "@anthropic-ai", "claude-code", "cli.js"),
+          // Unix 风格全局目录 (prefix/lib/node_modules)
+          join6(cmdDir, "..", "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
+          join6(cmdDir, "..", "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+        ];
+        for (const candidate of candidates) {
+          if (existsSync3(candidate)) {
+            logger.info("Found Claude executable", { path: candidate });
+            return candidate;
           }
-          logger.warn("Found claude.cmd but could not locate cli.js", { cmdPath, tried: possiblePaths });
         }
       }
     } catch (error2) {
-      logger.warn("Failed to find claude.cmd via where command", { error: String(error2) });
+      logger.warn("Failed to find claude via where command", { error: String(error2) });
+    }
+    try {
+      const npmRoot = execSync("npm root -g", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+      const candidates = [
+        join6(npmRoot, "@anthropic-ai", "claude-code", "bin", "claude.exe"),
+        join6(npmRoot, "@anthropic-ai", "claude-code", "cli.js")
+      ];
+      for (const candidate of candidates) {
+        if (existsSync3(candidate)) {
+          logger.info("Found Claude executable via npm root -g", { path: candidate });
+          return candidate;
+        }
+      }
+    } catch (error2) {
+      logger.warn("Failed to locate claude via npm root -g", { error: String(error2) });
     }
   } else {
     try {
       const result = execSync("which claude", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
       const claudePath = result.trim();
-      if (existsSync3(claudePath)) {
-        const claudeDir = dirname2(claudePath);
-        const possiblePaths = [
-          join4(claudeDir, "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
-          join4(claudeDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+      if (claudePath && existsSync3(claudePath)) {
+        const realPath = realpathSync3(claudePath);
+        if (/cli\.js$/.test(realPath)) {
+          logger.info("Found Claude CLI cli.js", { path: realPath });
+          return realPath;
+        }
+        if (isNativeBinaryFile(realPath)) {
+          logger.info("Found Claude native executable", { path: realPath });
+          return realPath;
+        }
+        const claudeDir = dirname2(realPath);
+        const candidates = [
+          join6(claudeDir, "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude"),
+          join6(claudeDir, "..", "lib", "node_modules", "@anthropic-ai", "claude-code", "cli.js"),
+          join6(claudeDir, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude"),
+          join6(claudeDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
         ];
-        for (const cliPath of possiblePaths) {
-          if (existsSync3(cliPath)) {
-            logger.info("Found Claude CLI cli.js", { path: cliPath });
-            return cliPath;
+        for (const candidate of candidates) {
+          if (existsSync3(candidate)) {
+            logger.info("Found Claude executable", { path: candidate });
+            return candidate;
           }
         }
       }
@@ -16827,8 +17195,29 @@ function findClaudeExecutable() {
     }
   }
   throw new Error(
-    "Could not locate Claude CLI cli.js file. Please ensure Claude CLI is installed via:\n  npm install -g @anthropic-ai/claude-code\nOr specify the path manually."
+    "Could not locate Claude Code executable (cli.js or native binary). Please ensure Claude Code is installed via:\n  npm install -g @anthropic-ai/claude-code\nOr install the native installer from https://claude.com/claude-code"
   );
+}
+function isNativeBinaryFile(filePath) {
+  try {
+    const fd = openSync2(filePath, "r");
+    try {
+      const buf = Buffer.alloc(4);
+      const bytesRead = readSync2(fd, buf, 0, 4, 0);
+      if (bytesRead < 4) {
+        return false;
+      }
+      if (buf[0] === 127 && buf[1] === 69 && buf[2] === 76 && buf[3] === 70) {
+        return true;
+      }
+      const magic = buf.readUInt32BE(0);
+      return magic === 4277009102 || magic === 4277009103 || magic === 3405691582 || magic === 3405691583;
+    } finally {
+      closeSync2(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 var ClaudeAgentWrapper = class {
   currentQuery = null;
@@ -16899,6 +17288,20 @@ var ClaudeAgentWrapper = class {
       includePartialMessages: true,
       model: options.model,
       maxTurns: options.maxTurns,
+      // 禁用 ToolSearch 工具。
+      //
+      // 背景：若用户在 ~/.claude/settings.json 的 env 中开启了 ENABLE_TOOL_SEARCH，
+      // Claude Code 会额外提供一个 ToolSearch 工具用于"按需发现"工具。该机制是为
+      // 挂载了大量 MCP 工具的场景设计的，但在本扩展场景下会严重误导模型：
+      // 模型看到 ToolSearch 后会反复用它去搜索 Read/Edit/Write，而这些内置工具
+      // 并不在可搜索的 deferred 列表中，搜索始终返回 "No matching deferred tools found"，
+      // 最终模型会得出"没有可用的文件读取/编辑工具"的错误结论并放弃任务。
+      //
+      // 说明：SDK 的 env 选项无法覆盖 settings.json 中的同名变量（settings 优先级更高），
+      // 因此改用 disallowedTools 将该工具从模型上下文中移除。经验证，移除后原先被
+      // 标记为 deferred 的工具（WebFetch/WebSearch/NotebookEdit 等）会全部直接暴露，
+      // 不会因此丢失任何能力。
+      disallowedTools: ["ToolSearch"],
       // 读取用户配置文件 (~/.claude/settings.json)
       // 这样可以使用用户配置的 ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL 等环境变量
       settingSources: ["user", "project", "local"]
@@ -16995,10 +17398,27 @@ var ClaudeAgentWrapper = class {
   }
   /**
    * 列出可用的会话
+   *
+   * @param cwd   按工作目录过滤；不传则返回全部
+   * @param limit 最多返回条数
    */
-  async listSessions(limit) {
-    logger.info("listSessions called", { limit });
-    return [];
+  async listSessions(cwd2, limit) {
+    logger.info("listSessions called", { cwd: cwd2, limit });
+    return listSessions(cwd2, limit);
+  }
+  /**
+   * 删除指定会话
+   */
+  async deleteSession(sessionId) {
+    logger.info("deleteSession called", { sessionId });
+    return deleteSession(sessionId);
+  }
+  /**
+   * 读取指定会话的历史消息
+   */
+  async getSessionHistory(sessionId) {
+    logger.info("getSessionHistory called", { sessionId });
+    return getSessionHistory(sessionId);
   }
   /**
    * 恢复会话
@@ -17199,10 +17619,55 @@ var ClaudeAgentService = class {
     this.server.onRequest(
       Methods.LIST_SESSIONS,
       async (params) => {
-        logger.info("List sessions request received", { limit: params.limit });
+        const allProjects = params.allProjects === true;
+        const requestedCwd = typeof params.cwd === "string" && params.cwd.trim() ? params.cwd.trim() : void 0;
+        const effectiveCwd = allProjects ? void 0 : requestedCwd ?? this.workingDirectory ?? void 0;
+        logger.info("List sessions request received", {
+          limit: params.limit,
+          allProjects,
+          requestedCwd,
+          effectiveCwd
+        });
+        if (!allProjects && !effectiveCwd) {
+          logger.warn("Project-scoped listing requested without a working directory");
+          return { sessions: [] };
+        }
         const agent = getAgent();
-        const sessions = await agent.listSessions(params.limit);
-        return { sessions };
+        const sessions = await agent.listSessions(effectiveCwd, params.limit);
+        return {
+          sessions: sessions.map((s) => ({
+            sessionId: s.sessionId,
+            createdAt: s.createdAt,
+            lastUpdatedAt: s.lastUpdatedAt,
+            messageCount: s.messageCount,
+            cwd: s.cwd,
+            title: s.title
+          }))
+        };
+      }
+    );
+    this.server.onRequest(
+      Methods.DELETE_SESSION,
+      async (params) => {
+        logger.info("Delete session request received", { sessionId: params.sessionId });
+        if (!params.sessionId) {
+          throw new Error("sessionId is required");
+        }
+        const agent = getAgent();
+        const deleted = await agent.deleteSession(params.sessionId);
+        return { deleted };
+      }
+    );
+    this.server.onRequest(
+      Methods.SESSION_HISTORY,
+      async (params) => {
+        logger.info("Session history request received", { sessionId: params.sessionId });
+        if (!params.sessionId) {
+          throw new Error("sessionId is required");
+        }
+        const agent = getAgent();
+        const messages = await agent.getSessionHistory(params.sessionId);
+        return { messages };
       }
     );
     this.server.onRequest(

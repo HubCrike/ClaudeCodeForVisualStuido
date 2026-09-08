@@ -213,7 +213,10 @@ namespace ClaudeCodeForVS.Services
         /// <summary>
         /// 列出可用的会话
         /// </summary>
-        public async Task<JArray> ListSessionsAsync(int? limit = null, CancellationToken ct = default)
+        /// <param name="limit">最多返回条数</param>
+        /// <param name="allProjects">true 表示跨项目返回全部会话</param>
+        /// <param name="cwd">按此工作目录过滤，仅在 allProjects 为 false 时生效；为空则由服务端使用当前工作目录</param>
+        public async Task<JArray> ListSessionsAsync(int? limit = null, bool allProjects = false, string cwd = null, CancellationToken ct = default)
         {
             ThrowIfDisposed();
 
@@ -224,10 +227,52 @@ namespace ClaudeCodeForVS.Services
 
             var response = await SendRequestAsync("sessions.list", new
             {
-                limit
+                limit,
+                allProjects,
+                cwd
             }, ct).ConfigureAwait(false);
 
             return response["result"]?["sessions"] as JArray ?? new JArray();
+        }
+
+        /// <summary>
+        /// 删除指定会话
+        /// </summary>
+        public async Task<bool> DeleteSessionAsync(string sessionId, CancellationToken ct = default)
+        {
+            ThrowIfDisposed();
+
+            if (!_initialized || _process == null || _process.HasExited)
+            {
+                throw new InvalidOperationException("Service not initialized");
+            }
+
+            var response = await SendRequestAsync("sessions.delete", new
+            {
+                sessionId
+            }, ct).ConfigureAwait(false);
+
+            return response["result"]?["deleted"]?.Value<bool>() ?? false;
+        }
+
+        /// <summary>
+        /// 读取指定会话的历史消息
+        /// </summary>
+        public async Task<JArray> GetSessionHistoryAsync(string sessionId, CancellationToken ct = default)
+        {
+            ThrowIfDisposed();
+
+            if (!_initialized || _process == null || _process.HasExited)
+            {
+                throw new InvalidOperationException("Service not initialized");
+            }
+
+            var response = await SendRequestAsync("sessions.history", new
+            {
+                sessionId
+            }, ct).ConfigureAwait(false);
+
+            return response["result"]?["messages"] as JArray ?? new JArray();
         }
 
         /// <summary>

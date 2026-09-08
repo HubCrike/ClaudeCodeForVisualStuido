@@ -105,6 +105,14 @@ export interface PermissionResponseResult {
 /** 会话列表请求 */
 export interface ListSessionsParams {
   limit?: number;
+  /**
+   * true 表示跨项目返回全部会话；
+   * false 或缺省表示只返回 cwd 指定目录（缺省时为当前工作目录）下的会话。
+   * 使用独立布尔字段而非依赖 cwd 是否为空，避免 null/undefined/'' 的三态歧义。
+   */
+  allProjects?: boolean;
+  /** 按此工作目录过滤；仅在 allProjects 非 true 时生效 */
+  cwd?: string;
 }
 
 export interface SessionInfo {
@@ -112,10 +120,37 @@ export interface SessionInfo {
   createdAt: number;
   lastUpdatedAt: number;
   messageCount: number;
+  /** 会话所属工作目录 */
+  cwd?: string;
+  /** 会话标题（首条用户消息摘要） */
+  title?: string;
 }
 
 export interface ListSessionsResult {
   sessions: SessionInfo[];
+}
+
+/** 删除会话请求 */
+export interface DeleteSessionParams {
+  sessionId: string;
+}
+
+export interface DeleteSessionResult {
+  deleted: boolean;
+}
+
+/** 会话历史请求 */
+export interface SessionHistoryParams {
+  sessionId: string;
+}
+
+export interface SessionHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface SessionHistoryResult {
+  messages: SessionHistoryMessage[];
 }
 
 /** 恢复会话请求 */
@@ -237,6 +272,8 @@ export const Methods = {
   SHUTDOWN: 'shutdown',
   LIST_SESSIONS: 'sessions.list',
   RESUME_SESSION: 'sessions.resume',
+  DELETE_SESSION: 'sessions.delete',
+  SESSION_HISTORY: 'sessions.history',
   
   // 通知方法
   AGENT_EVENT: 'agent.event',

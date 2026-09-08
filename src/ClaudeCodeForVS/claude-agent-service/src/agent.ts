@@ -17,68 +17,118 @@ import {
   type CanUseTool,
 } from '@anthropic-ai/claude-agent-sdk';
 import { logger } from './utils/logger.js';
+import {
+  listSessions,
+  deleteSession,
+  getSessionHistory,
+  type SessionSummary,
+  type HistoryMessage,
+} from './sessions.js';
 import { execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, realpathSync, openSync, readSync, closeSync } from 'fs';
 import { join, dirname } from 'path';
 
 /**
- * 查找 Claude CLI 的 cli.js 文件路径
- * 
- * Windows 下 claude.cmd 会调用 node_modules/@anthropic-ai/claude-code/cli.js
- * 我们需要找到这个实际的 JS 文件路径
+ * 查找 Claude CLI 可执行文件路径
+ *
+ * 新版 Claude Code (2.x) 通过 npm 安装时是原生二进制分发（bin/claude.exe），
+ * 包内没有 cli.js；旧版则是 node_modules/@anthropic-ai/claude-code/cli.js。
+ * 两种形态都支持，优先返回原生二进制。
  */
 function findClaudeExecutable(): string {
-  // Windows: 通过 where 命令找到 claude.cmd 的位置
   if (process.platform === 'win32') {
+    // Windows: `where claude` 会返回 PATH 中所有匹配项
+    // （claude / claude.cmd / claude.ps1 shim，以及原生 claude.exe）
     try {
-      const result = execSync('where claude.cmd', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-      const paths = result.trim().split('\n');
-      
-      for (const p of paths) {
-        const cmdPath = p.trim();
-        if (existsSync(cmdPath)) {
-          // claude.cmd 通常在 node_modules/.bin/ 或 npm 全局目录
-          // cli.js 位于同级的 node_modules/@anthropic-ai/claude-code/cli.js
-          const cmdDir = dirname(cmdPath);
-          
-          // 尝试多个可能的路径
-          const possiblePaths = [
-            join(cmdDir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
-            join(cmdDir, '..', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
-            join(cmdDir, '..', '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
-          ];
-          
-          for (const cliPath of possiblePaths) {
-            if (existsSync(cliPath)) {
-              logger.info('Found Claude CLI cli.js', { path: cliPath });
-              return cliPath;
-            }
+      const result = execSync('where claude', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      for (const line of result.trim().split('\n')) {
+        const p = line.trim();
+        if (!p || !existsSync(p)) {
+          continue;
+        }
+
+        // 原生二进制（bin/claude.exe），可直接交给 SDK 执行
+        if (/\.exe$/i.test(p)) {
+          logger.info('Found Claude native executable', { path: p });
+          return p;
+        }
+
+        // shim 脚本（claude / claude.cmd / claude.ps1）：推导包安装目录
+        const cmdDir = dirname(p);
+        const candidates = [
+          // npm 全局目录结构: <prefix>\node_modules\@anthropic-ai\claude-code\...
+          join(cmdDir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+          join(cmdDir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
+          // 项目内 .bin 目录结构: <proj>\node_modules\.bin\claude.cmd
+          join(cmdDir, '..', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+          join(cmdDir, '..', '@anthropic-ai', 'claude-code', 'cli.js'),
+          // Unix 风格全局目录 (prefix/lib/node_modules)
+          join(cmdDir, '..', '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+          join(cmdDir, '..', '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
+        ];
+
+        for (const candidate of candidates) {
+          if (existsSync(candidate)) {
+            logger.info('Found Claude executable', { path: candidate });
+            return candidate;
           }
-          
-          logger.warn('Found claude.cmd but could not locate cli.js', { cmdPath, tried: possiblePaths });
         }
       }
     } catch (error) {
-      logger.warn('Failed to find claude.cmd via where command', { error: String(error) });
+      logger.warn('Failed to find claude via where command', { error: String(error) });
+    }
+
+    // 兜底: 通过 npm root -g 定位全局 node_modules
+    try {
+      const npmRoot = execSync('npm root -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const candidates = [
+        join(npmRoot, '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+        join(npmRoot, '@anthropic-ai', 'claude-code', 'cli.js'),
+      ];
+      for (const candidate of candidates) {
+        if (existsSync(candidate)) {
+          logger.info('Found Claude executable via npm root -g', { path: candidate });
+          return candidate;
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to locate claude via npm root -g', { error: String(error) });
     }
   } else {
     // Unix-like: 查找 claude 可执行文件
     try {
       const result = execSync('which claude', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
       const claudePath = result.trim();
-      
-      if (existsSync(claudePath)) {
-        // Unix 下可能是符号链接或 shell 脚本，需要找到实际的 cli.js
-        const claudeDir = dirname(claudePath);
-        const possiblePaths = [
+
+      if (claudePath && existsSync(claudePath)) {
+        // 解析符号链接，得到真实文件（可能是包内的 cli.js 或原生二进制）
+        const realPath = realpathSync(claudePath);
+
+        // 直接就是包内的 cli.js（旧版 npm 安装方式）
+        if (/cli\.js$/.test(realPath)) {
+          logger.info('Found Claude CLI cli.js', { path: realPath });
+          return realPath;
+        }
+
+        // 原生安装器（~/.local/bin/claude 等）：claude 本身就是原生二进制，
+        // 通过魔数（ELF / Mach-O）判断，避免误把 shell shim 当成二进制
+        if (isNativeBinaryFile(realPath)) {
+          logger.info('Found Claude native executable', { path: realPath });
+          return realPath;
+        }
+
+        // shim 脚本：从所在目录推导包安装位置
+        const claudeDir = dirname(realPath);
+        const candidates = [
+          join(claudeDir, '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude'),
           join(claudeDir, '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
+          join(claudeDir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude'),
           join(claudeDir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
         ];
-        
-        for (const cliPath of possiblePaths) {
-          if (existsSync(cliPath)) {
-            logger.info('Found Claude CLI cli.js', { path: cliPath });
-            return cliPath;
+        for (const candidate of candidates) {
+          if (existsSync(candidate)) {
+            logger.info('Found Claude executable', { path: candidate });
+            return candidate;
           }
         }
       }
@@ -89,10 +139,38 @@ function findClaudeExecutable(): string {
 
   // 如果找不到，抛出详细错误
   throw new Error(
-    'Could not locate Claude CLI cli.js file. Please ensure Claude CLI is installed via:\n' +
+    'Could not locate Claude Code executable (cli.js or native binary). Please ensure Claude Code is installed via:\n' +
     '  npm install -g @anthropic-ai/claude-code\n' +
-    'Or specify the path manually.'
+    'Or install the native installer from https://claude.com/claude-code'
   );
+}
+
+/**
+ * 通过文件魔数判断是否为原生二进制（ELF / Mach-O），
+ * 用于区分原生 Claude Code 可执行文件和 shell 脚本 shim
+ */
+function isNativeBinaryFile(filePath: string): boolean {
+  try {
+    const fd = openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(4);
+      const bytesRead = readSync(fd, buf, 0, 4, 0);
+      if (bytesRead < 4) {
+        return false;
+      }
+      // ELF: 0x7F 'E' 'L' 'F' (Linux)
+      if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {
+        return true;
+      }
+      // Mach-O: 0xFEEDFACE / 0xFEEDFACF / 0xCAFEBABE (macOS)
+      const magic = buf.readUInt32BE(0);
+      return magic === 0xfeedface || magic === 0xfeedfacf || magic === 0xcafebabe || magic === 0xcafebabf;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 export interface QueryOptions {
@@ -211,6 +289,20 @@ export class ClaudeAgentWrapper {
       includePartialMessages: true,
       model: options.model,
       maxTurns: options.maxTurns,
+      // 禁用 ToolSearch 工具。
+      //
+      // 背景：若用户在 ~/.claude/settings.json 的 env 中开启了 ENABLE_TOOL_SEARCH，
+      // Claude Code 会额外提供一个 ToolSearch 工具用于"按需发现"工具。该机制是为
+      // 挂载了大量 MCP 工具的场景设计的，但在本扩展场景下会严重误导模型：
+      // 模型看到 ToolSearch 后会反复用它去搜索 Read/Edit/Write，而这些内置工具
+      // 并不在可搜索的 deferred 列表中，搜索始终返回 "No matching deferred tools found"，
+      // 最终模型会得出"没有可用的文件读取/编辑工具"的错误结论并放弃任务。
+      //
+      // 说明：SDK 的 env 选项无法覆盖 settings.json 中的同名变量（settings 优先级更高），
+      // 因此改用 disallowedTools 将该工具从模型上下文中移除。经验证，移除后原先被
+      // 标记为 deferred 的工具（WebFetch/WebSearch/NotebookEdit 等）会全部直接暴露，
+      // 不会因此丢失任何能力。
+      disallowedTools: ['ToolSearch'],
       // 读取用户配置文件 (~/.claude/settings.json)
       // 这样可以使用用户配置的 ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL 等环境变量
       settingSources: ['user', 'project', 'local'],
@@ -332,19 +424,29 @@ export class ClaudeAgentWrapper {
 
   /**
    * 列出可用的会话
+   *
+   * @param cwd   按工作目录过滤；不传则返回全部
+   * @param limit 最多返回条数
    */
-  async listSessions(limit?: number): Promise<Array<{
-    sessionId: string;
-    createdAt: number;
-    lastUpdatedAt: number;
-    messageCount: number;
-  }>> {
-    // SDK 目前没有直接的会话列表 API，需要从文件系统读取
-    // 这里返回空数组作为占位符，实际实现需要访问 ~/.claude/projects 目录
-    logger.info('listSessions called', { limit });
-    
-    // TODO: 实现从 ~/.claude/projects 目录读取会话列表
-    return [];
+  async listSessions(cwd?: string, limit?: number): Promise<SessionSummary[]> {
+    logger.info('listSessions called', { cwd, limit });
+    return listSessions(cwd, limit);
+  }
+
+  /**
+   * 删除指定会话
+   */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    logger.info('deleteSession called', { sessionId });
+    return deleteSession(sessionId);
+  }
+
+  /**
+   * 读取指定会话的历史消息
+   */
+  async getSessionHistory(sessionId: string): Promise<HistoryMessage[]> {
+    logger.info('getSessionHistory called', { sessionId });
+    return getSessionHistory(sessionId);
   }
 
   /**

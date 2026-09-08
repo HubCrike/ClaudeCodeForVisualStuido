@@ -347,6 +347,40 @@ namespace ClaudeCodeForVS
                     _ = HandlePermissionResponseAsync(requestId, decision, reason);
                     return;
                 }
+
+                // 新建会话
+                if (string.Equals(type, "newSession", StringComparison.OrdinalIgnoreCase))
+                {
+                    _viewModel.NewSession();
+                    _ = PushFullStateAsync();
+                    return;
+                }
+
+                // 获取历史会话列表
+                if (string.Equals(type, "listSessions", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 默认只看当前解决方案的会话；前端可传 onlyCurrentProject=false 查看全部
+                    var onlyCurrent = msg.Value<bool?>("onlyCurrentProject") ?? true;
+                    _ = SendSessionsAsync(onlyCurrent);
+                    return;
+                }
+
+                // 加载并继续某个历史会话
+                if (string.Equals(type, "loadSession", StringComparison.OrdinalIgnoreCase))
+                {
+                    var sessionId = msg.Value<string>("sessionId");
+                    _ = LoadSessionAsync(sessionId);
+                    return;
+                }
+
+                // 删除历史会话
+                if (string.Equals(type, "deleteSession", StringComparison.OrdinalIgnoreCase))
+                {
+                    var sessionId = msg.Value<string>("sessionId");
+                    var onlyCurrent = msg.Value<bool?>("onlyCurrentProject") ?? true;
+                    _ = DeleteSessionAsync(sessionId, onlyCurrent);
+                    return;
+                }
             }
             catch (Exception ex)
             {
@@ -367,6 +401,7 @@ namespace ClaudeCodeForVS
                 {
                     type = "state",
                     isRunning = _viewModel.IsRunning,
+                    currentSessionId = _viewModel.CurrentSessionId,
                     messages = _viewModel.Messages.Select(m => new
                     {
                         role = m.Role,
@@ -383,6 +418,131 @@ namespace ClaudeCodeForVS
             }
 
             return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// 查询历史会话列表并推送给前端
+        /// </summary>
+        private async Task SendSessionsAsync(bool onlyCurrentProject)
+        {
+            try
+            {
+                var result = await _viewModel.ListSessionsAsync(onlyCurrentProject);
+                var sessions = result.Sessions;
+
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                if (Browser?.CoreWebView2 == null)
+                    return;
+
+                var payload = new
+                {
+                    type = "sessions",
+                    onlyCurrentProject,
+                    currentSessionId = _viewModel.CurrentSessionId,
+                    filterDirectory = result.FilterDirectory,
+                    sessions = sessions.Select(s => new
+                    {
+                        sessionId = s["sessionId"]?.Value<string>(),
+                        title = s["title"]?.Value<string>(),
+                        cwd = s["cwd"]?.Value<string>(),
+                        messageCount = s["messageCount"]?.Value<int>() ?? 0,
+                        createdAt = s["createdAt"]?.Value<long>() ?? 0L,
+                        lastUpdatedAt = s["lastUpdatedAt"]?.Value<long>() ?? 0L
+                    }).ToArray()
+                };
+
+                Browser.CoreWebView2.PostWebMessageAsJson(JsonConvert.SerializeObject(payload));
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("[SendSessionsAsync] Failed to list sessions", ex);
+                await SendSessionErrorAsync(ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 加载并继续指定历史会话
+        /// </summary>
+        private async Task LoadSessionAsync(string sessionId)
+        {
+            try
+            {
+                var loaded = await _viewModel.LoadSessionAsync(sessionId);
+
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                if (!loaded)
+                {
+                    await SendSessionErrorAsync("无法加载会话，请先等待当前回答结束");
+                    return;
+                }
+
+                await PushFullStateAsync();
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("[LoadSessionAsync] Failed to load session", ex);
+                await SendSessionErrorAsync("加载会话失败: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 删除指定历史会话，成功后刷新列表
+        /// </summary>
+        private async Task DeleteSessionAsync(string sessionId, bool onlyCurrentProject)
+        {
+            try
+            {
+                var wasCurrent = string.Equals(sessionId, _viewModel.CurrentSessionId, StringComparison.OrdinalIgnoreCase);
+                var deleted = await _viewModel.DeleteSessionAsync(sessionId);
+
+                if (!deleted)
+                {
+                    await SendSessionErrorAsync("删除会话失败");
+                    return;
+                }
+
+                // 删除的是当前会话时，界面已被清空，需要同步状态
+                if (wasCurrent)
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    await PushFullStateAsync();
+                }
+
+                await SendSessionsAsync(onlyCurrentProject);
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("[DeleteSessionAsync] Failed to delete session", ex);
+                await SendSessionErrorAsync("删除会话失败: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 向前端推送会话操作的错误提示
+        /// </summary>
+        private async Task SendSessionErrorAsync(string message)
+        {
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                if (Browser?.CoreWebView2 == null)
+                    return;
+
+                var payload = new
+                {
+                    type = "sessionError",
+                    message
+                };
+
+                Browser.CoreWebView2.PostWebMessageAsJson(JsonConvert.SerializeObject(payload));
+            }
+            catch (Exception ex)
+            {
+                LogService.Error("[SendSessionErrorAsync] Failed to push error", ex);
+            }
         }
 
         private async Task SendEditorContextAsync()
