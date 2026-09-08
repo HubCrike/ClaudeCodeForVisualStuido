@@ -1,31 +1,28 @@
-# ClaudeCodeForVS
+# ClaudeCodeForVS（Fork 版）
 
-[English](README.en.md) | 简体中文
+> 🤖 让 Claude 成为你的 Visual Studio 编程搭档！一个将 Claude Code 集成到 IDE 的扩展，带来丝滑的 AI 辅助编码体验。
 
-> 🤖 让 Claude 成为你的 Visual Studio 编程搭档！一个将 Claude Code ~~深度~~集成到 IDE 的扩展，带来丝滑的 AI 辅助编码体验。
+本项目 Fork 自 [YaKun9/ClaudeCodeForVS](https://github.com/HubCrike/ClaudeCodeForVisualStuido)，在其基础上进行了增强和改进。
 
-这是一个将 Claude Code 集成到 Visual Studio 的扩展，提供聊天界面、编辑器上下文、文件引用以及通过 Claude CLI 执行命令的能力。
+## 📌 Fork 的原因
 
-## ✨ 功能特性
+原版本基于**旧版 Claude Code**使用的是cli.js,新版本使用的是原生二进制分发（claude.exe），在新版本下运行会直接报错。作者好像有段时间没有维护了，因此自己 Fork 了一份进行修改，让扩展能够在新版本 Claude Code 下**正常运行并读取修改代码**。
 
-- 🎨 **内置聊天窗口** - 在 Visual Studio 中直接打开工具窗口，无需切换应用
-- 🎯 **智能上下文跟踪** - 可选捕获当前文件和选中内容，让 Claude 更懂你的代码
-- 📁 **便捷文件引用** - 文件选择器轻松添加文件引用，无需手动输入路径
-- ⚡ **流式输出渲染** - Claude Agent 的响应实时呈现在时间线中，体验流畅自然
-- 📝 **完善的日志系统** - 基于 Serilog 记录运行日志，按天滚动存储，问题排查更轻松
+## ✨ 相比原版的主要改进
 
-## 💡 关于本项目
-
-**🤖 AI 生成声明**
-
-本项目代码主要由 AI 自动生成，通过 Claude Code 的强大能力，将自然语言需求转化为高质量的生产代码。这不仅是实用的开发工具，更是展示 AI 辅助编程可能性的探索项目。
+- 🆕 **适配新版 Claude Code** - 修复了新版 Claude Code 下无法启动/报错的问题，扩展可以正常运行并正确读取代码修改
+- 💬 **新建会话** - 原版整个使用过程都在同一份上下文中进行，使用久了上下文会变得很长，既浪费 token 也不利于聚焦。现在可以随时新建一个干净的会话
+- 📜 **历史会话管理** - 历史会话分为**当前项目**和**全部**两个视图：
+  - 点击某个历史会话，即可继续之前的上下文继续对话
+  - 支持删除不再需要的历史会话
 
 ## 🔧 环境要求
 
-- **Visual Studio** 2022 或 2026（⭐ 推荐 2026 以获得最佳体验）
+- **Visual Studio**（本人环境为 VS2016，理论上 2022+ 均可）
+- **Claude Code** v2.1.263（本人环境实测可用）截止目前最新版
 - **WebView2 运行时**（现代 Visual Studio 已自带）
 - **Node.js** v20 或更高版本（用于运行 Claude Agent Service）
-- **Claude API 凭据**（至少设置 `ANTHROPIC_API_KEY`，也可通过配置文件提供）
+- **Claude API 凭据**（`ANTHROPIC_API_KEY` 等）
 
 ## 🚀 安装方式
 
@@ -39,19 +36,19 @@
 
 3️⃣ 输入你的提示词，开始与 Claude 对话！
 
+## 🗂️ 会话使用说明
+
+- **新建会话**：需要开始一个新任务时，新建一个会话，避免旧上下文干扰、节省 token
+- **历史会话**：侧边栏可查看历史会话列表，支持按 **当前项目** / **全部** 筛选
+- **继续对话**：点击任意历史会话即可恢复其上下文，接着聊
+- **删除会话**：不需要的会话可直接删除
+
 ## ⚙️ 配置说明
 
-- 配置文件路径：`~/.claude/settings.json`
-  - Windows 示例：`C:\Users\<用户名>\.claude\settings.json`
-- 支持在配置文件或系统环境变量中设置：
-  - `ANTHROPIC_API_KEY`
-  - `ANTHROPIC_AUTH_TOKEN`
-  - `ANTHROPIC_BASE_URL`
 - 扩展使用内置的 Agent SDK Service (Node.js)，请确保系统已安装 Node.js 且 `node` 命令可用
+- 正常Claude Code Cli能使用一般就没问题
 
 ## 📋 日志位置
-
-运行日志输出到以下路径：
 
 ```
 %LOCALAPPDATA%\ClaudeCodeForVS\Logs
